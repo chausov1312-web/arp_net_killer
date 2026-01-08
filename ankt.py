@@ -481,7 +481,7 @@ def find_local_network_devices(local_ip, mask):
         
         # Быстрое сканирование с nmap
         result = subprocess.run(
-            f"nmap -sn -n --min-parallelism 100 --max-rtt-timeout 2000ms {network_prefix}.0/24",
+            f"nmap -sn -n --min-parallelism 10 --max-rtt-timeout 7000ms {network_prefix}.0/24",
             shell=True, capture_output=True, text=True, timeout=60
         )
         
