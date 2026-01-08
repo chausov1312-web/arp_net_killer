@@ -8,6 +8,7 @@ from modules.interface_manager import get_interfaces, get_network_info_enhanced
 from modules.gateway_detector import get_gateway_info
 from modules.network_scanner import find_local_network_devices
 from modules.banner import show_banner
+from modules.arp_utils import get_mac_by_arp
 from attack import ARPAttack
 
 def main_menu():
@@ -56,12 +57,142 @@ def main_menu():
         'gateway_mac': gateway_mac
     }
 
+def handle_action(action, devices, attack, network_info, available_victims):
+    """Обработка выбранного действия"""
+    if "Выбрать шлюз" in action:
+        # Выбираем шлюз из списка
+        device_list = [f"{d['ip']:15s} | {d['mac']}" for d in devices]
+        gateway_choice = run_fzf(device_list, "🌐 Выберите шлюз (роутер) →")
+        if gateway_choice:
+            gateway_ip = gateway_choice.split('|')[0].strip()
+            for d in devices:
+                if d['ip'] == gateway_ip:
+                    network_info['gateway_mac'] = d['mac']
+                    network_info['gateway_ip'] = gateway_ip
+                    print(f"\033[1;32m[✓] Шлюз выбран: {gateway_ip} ({network_info['gateway_mac']})\033[0m")
+                    # Обновляем объект атаки
+                    attack.gateway_ip = gateway_ip
+                    attack.gateway_mac = network_info['gateway_mac']
+                    break
+        return 'continue'
+    
+    elif "Ввести шлюз вручную" in action:
+        # Ввод шлюза вручную
+        gateway_ip = input("\n\033[1;34m[?] Введите IP шлюза: \033[0m").strip()
+        # Определяем MAC шлюза
+        gateway_mac = get_mac_by_arp(gateway_ip, retries=3)
+        if gateway_mac:
+            network_info['gateway_ip'] = gateway_ip
+            network_info['gateway_mac'] = gateway_mac
+            attack.gateway_ip = gateway_ip
+            attack.gateway_mac = gateway_mac
+        return 'continue'
+    
+    elif "Выбрать жертвы из списка" in action:
+        # Выбираем жертвы из списка (множественный выбор)
+        victims_list = []
+        for d in available_victims:
+            victims_list.append(f"{d['ip']:15s} | {d['mac']}")
+        
+        selected_victims = run_fzf(victims_list, 
+                                   "🎯 Выберите жертвы (Space для выбора, Enter для подтверждения) →", 
+                                   multi=True)
+        if selected_victims:
+            for victim_str in selected_victims:
+                victim_ip = victim_str.split('|')[0].strip()
+                for d in available_victims:
+                    if d['ip'] == victim_ip:
+                        # Проверяем, не добавлена ли уже эта жертва
+                        if not any(v['ip'] == victim_ip for v in attack.victims):
+                            attack.add_victim(victim_ip, d['mac'])
+                            print(f"\033[1;32m[+] Жертва добавлена: {victim_ip}\033[0m")
+                        break
+        return 'continue'
+    
+    elif "Добавить все устройства" in action:
+        # Добавляем все устройства как жертвы
+        count = 0
+        for d in devices:
+            if d['ip'] != network_info['local_ip'] and \
+               (not network_info['gateway_ip'] or d['ip'] != network_info['gateway_ip']):
+                if not any(v['ip'] == d['ip'] for v in attack.victims):
+                    attack.add_victim(d['ip'], d['mac'])
+                    count += 1
+        print(f"\033[1;32m[+] Добавлено {count} жертв\033[0m")
+        return 'continue'
+    
+    elif "Удалить жертву из списка" in action:
+        # Удаляем жертву из списка
+        if attack.get_victim_count() > 0:
+            victims_list = [f"{v['ip']:15s} | {v['mac']}" for v in attack.victims]
+            victim_to_remove = run_fzf(victims_list, "➖ Выберите жертву для удаления →")
+            if victim_to_remove:
+                victim_ip = victim_to_remove.split('|')[0].strip()
+                attack.remove_victim(victim_ip)
+                print(f"\033[1;33m[-] Жертва удалена: {victim_ip}\033[0m")
+        return 'continue'
+    
+    elif "Очистить список жертв" in action:
+        # Очищаем список жертв
+        attack.victims = []
+        print(f"\033[1;33m[-] Список жертв очищен\033[0m")
+        return 'continue'
+    
+    elif "Ввести жертвы вручную" in action:
+        # Ввод жертв вручную
+        print("\n\033[1;34m[?] Введите IP жертв (через пробел или запятую):\033[0m")
+        victim_ips_input = input("   IP жертв: ").strip()
+        
+        # Разделяем ввод
+        victim_ips = []
+        for separator in [',', ' ', ';', '|']:
+            if separator in victim_ips_input:
+                victim_ips = [ip.strip() for ip in victim_ips_input.split(separator) if ip.strip()]
+                break
+        
+        if not victim_ips:
+            victim_ips = [victim_ips_input]
+        
+        for victim_ip in victim_ips:
+            if victim_ip:
+                # Определяем MAC жертвы
+                print(f"\n\033[1;33m[*] Определяю MAC жертвы {victim_ip}...\033[0m")
+                victim_mac = get_mac_by_arp(victim_ip, retries=3)
+                
+                if victim_mac:
+                    # Проверяем, не добавлена ли уже эта жертва
+                    if not any(v['ip'] == victim_ip for v in attack.victims):
+                        attack.add_victim(victim_ip, victim_mac)
+                        print(f"\033[1;32m[+] Жертва добавлена: {victim_ip}\033[0m")
+        return 'continue'
+    
+    elif "Повторить сканирование" in action:
+        # Просто продолжаем цикл (начнется с нового сканирования)
+        return 'rescan'
+    
+    elif "Выйти в главное меню" in action:
+        return 'exit'
+    
+    elif "Начать атаку" in action:
+        # Проверяем, есть ли все данные для атаки
+        if not attack.gateway_ip or not attack.gateway_mac:
+            print("\033[1;31m[!] Не указан шлюз!\033[0m")
+            return 'continue'
+        
+        if attack.get_victim_count() == 0:
+            print("\033[1;31m[!] Нет выбранных жертв!\033[0m")
+            return 'continue'
+        
+        return 'attack'
+    
+    return 'continue'
+
 def scan_and_attack_mode(network_info):
     """Режим сканирования и атаки"""
     attack = ARPAttack(
         network_info['interface'], 
-        network_info['gateway_ip'], 
-        network_info['gateway_mac']
+        network_info['gateway_ip'] if 'gateway_ip' in network_info else None,
+        network_info['gateway_mac'] if 'gateway_mac' in network_info else None
     )
     
     # Цикл выбора с опцией повторного сканирования
@@ -99,7 +230,7 @@ def scan_and_attack_mode(network_info):
         options_list = []
         
         # Опция выбора шлюза (только если еще не выбран)
-        if not network_info['gateway_ip'] or not network_info['gateway_mac']:
+        if not network_info.get('gateway_ip') or not network_info.get('gateway_mac'):
             if devices:
                 options_list.append("🌐 Выбрать шлюз из списка")
             else:
@@ -111,7 +242,7 @@ def scan_and_attack_mode(network_info):
             available_victims = []
             for d in devices:
                 if d['ip'] != network_info['local_ip'] and \
-                   (not network_info['gateway_ip'] or d['ip'] != network_info['gateway_ip']):
+                   (not network_info.get('gateway_ip') or d['ip'] != network_info['gateway_ip']):
                     # Проверяем, не выбрана ли уже эта жертва
                     if not any(v['ip'] == d['ip'] for v in attack.victims):
                         available_victims.append(d)
@@ -136,10 +267,10 @@ def scan_and_attack_mode(network_info):
         # Выбор действия
         action = run_fzf(options_list, "📋 Выберите действие →")
         if not action:
-            sys.exit(1)
+            return None
         
         # Обработка выбранного действия
-        handle_action(
+        result = handle_action(
             action, 
             devices, 
             attack, 
@@ -147,147 +278,34 @@ def scan_and_attack_mode(network_info):
             available_victims if 'available_victims' in locals() else []
         )
         
-        # Если выбрана атака, выходим из цикла
-        if "Начать атаку" in action:
-            break
-
-def handle_action(action, devices, attack, network_info, available_victims):
-    """Обработка выбранного действия"""
-    if "Выбрать шлюз" in action:
-        from modules.arp_utils import get_mac_by_arp
-        # Выбираем шлюз из списка
-        device_list = [f"{d['ip']:15s} | {d['mac']}" for d in devices]
-        gateway_choice = run_fzf(device_list, "🌐 Выберите шлюз (роутер) →")
-        if gateway_choice:
-            gateway_ip = gateway_choice.split('|')[0].strip()
-            for d in devices:
-                if d['ip'] == gateway_ip:
-                    network_info['gateway_mac'] = d['mac']
-                    print(f"\033[1;32m[✓] Шлюз выбран: {gateway_ip} ({network_info['gateway_mac']})\033[0m")
-                    # Обновляем объект атаки
-                    attack.gateway_ip = gateway_ip
-                    attack.gateway_mac = network_info['gateway_mac']
-                    break
-    
-    elif "Ввести шлюз вручную" in action:
-        from modules.arp_utils import get_mac_by_arp
-        # Ввод шлюза вручную
-        gateway_ip = input("\n\033[1;34m[?] Введите IP шлюза: \033[0m").strip()
-        # Определяем MAC шлюза
-        gateway_mac = get_mac_by_arp(gateway_ip, retries=3)
-        if gateway_mac:
-            network_info['gateway_ip'] = gateway_ip
-            network_info['gateway_mac'] = gateway_mac
-            attack.gateway_ip = gateway_ip
-            attack.gateway_mac = gateway_mac
-    
-    elif "Выбрать жертвы из списка" in action:
-        # Выбираем жертвы из списка (множественный выбор)
-        victims_list = []
-        for d in available_victims:
-            victims_list.append(f"{d['ip']:15s} | {d['mac']}")
-        
-        selected_victims = run_fzf(victims_list, 
-                                   "🎯 Выберите жертвы (Space для выбора, Enter для подтверждения) →", 
-                                   multi=True)
-        if selected_victims:
-            for victim_str in selected_victims:
-                victim_ip = victim_str.split('|')[0].strip()
-                for d in available_victims:
-                    if d['ip'] == victim_ip:
-                        # Проверяем, не добавлена ли уже эта жертва
-                        if not any(v['ip'] == victim_ip for v in attack.victims):
-                            attack.add_victim(victim_ip, d['mac'])
-                            print(f"\033[1;32m[+] Жертва добавлена: {victim_ip}\033[0m")
-                        break
-    
-    elif "Добавить все устройства" in action:
-        # Добавляем все устройства как жертвы
-        count = 0
-        for d in devices:
-            if d['ip'] != network_info['local_ip'] and \
-               (not network_info['gateway_ip'] or d['ip'] != network_info['gateway_ip']):
-                if not any(v['ip'] == d['ip'] for v in attack.victims):
-                    attack.add_victim(d['ip'], d['mac'])
-                    count += 1
-        print(f"\033[1;32m[+] Добавлено {count} жертв\033[0m")
-    
-    elif "Удалить жертву из списка" in action:
-        # Удаляем жертву из списка
-        if attack.get_victim_count() > 0:
-            victims_list = [f"{v['ip']:15s} | {v['mac']}" for v in attack.victims]
-            victim_to_remove = run_fzf(victims_list, "➖ Выберите жертву для удаления →")
-            if victim_to_remove:
-                victim_ip = victim_to_remove.split('|')[0].strip()
-                attack.remove_victim(victim_ip)
-                print(f"\033[1;33m[-] Жертва удалена: {victim_ip}\033[0m")
-    
-    elif "Очистить список жертв" in action:
-        # Очищаем список жертв
-        attack.victims = []
-        print(f"\033[1;33m[-] Список жертв очищен\033[0m")
-    
-    elif "Ввести жертвы вручную" in action:
-        from modules.arp_utils import get_mac_by_arp
-        # Ввод жертв вручную
-        print("\n\033[1;34m[?] Введите IP жертв (через пробел или запятую):\033[0m")
-        victim_ips_input = input("   IP жертв: ").strip()
-        
-        # Разделяем ввод
-        victim_ips = []
-        for separator in [',', ' ', ';', '|']:
-            if separator in victim_ips_input:
-                victim_ips = [ip.strip() for ip in victim_ips_input.split(separator) if ip.strip()]
-                break
-        
-        if not victim_ips:
-            victim_ips = [victim_ips_input]
-        
-        for victim_ip in victim_ips:
-            if victim_ip:
-                # Определяем MAC жертвы
-                print(f"\n\033[1;33m[*] Определяю MAC жертвы {victim_ip}...\033[0m")
-                victim_mac = get_mac_by_arp(victim_ip, retries=3)
-                
-                if victim_mac:
-                    # Проверяем, не добавлена ли уже эта жертва
-                    if not any(v['ip'] == victim_ip for v in attack.victims):
-                        attack.add_victim(victim_ip, victim_mac)
-                        print(f"\033[1;32m[+] Жертва добавлена: {victim_ip}\033[0m")
-    
-    elif "Повторить сканирование" in action:
-        # Просто продолжаем цикл (начнется с нового сканирования)
-        pass
-    
-    elif "Начать атаку" in action:
-        # Проверяем, есть ли все данные для атаки
-        if not attack.gateway_ip or not attack.gateway_mac:
-            print("\033[1;31m[!] Не указан шлюз!\033[0m")
-            return False
-        return True
+        # Обработка результатов
+        if result == 'attack':
+            return attack
+        elif result == 'exit':
+            return None
+        elif result == 'rescan':
+            continue  # Просто продолжаем цикл (начнется с нового сканирования)
 
 def manual_mode(network_info):
     """Ручной режим ввода данных"""
-    from modules.arp_utils import get_mac_by_arp
-    
     print("\n\033[1;34m[?] Введите данные вручную:\033[0m")
     
     attack = ARPAttack(
         network_info['interface'], 
-        network_info['gateway_ip'], 
-        network_info['gateway_mac']
+        network_info['gateway_ip'] if 'gateway_ip' in network_info else None,
+        network_info['gateway_mac'] if 'gateway_mac' in network_info else None
     )
     
     # Предлагаем использовать автоматически найденный шлюз
-    if network_info['gateway_ip']:
+    if network_info.get('gateway_ip'):
         use_auto = run_fzf(
             [f"✅ Использовать автоматически найденный шлюз ({network_info['gateway_ip']})", 
              "📝 Ввести другой шлюз"], 
             "🌐 Выберите шлюз →"
         )
-        if "автоматически" in use_auto:
+        if use_auto and "автоматически" in use_auto:
             print(f"\033[1;32m[✓] Использую шлюз: {network_info['gateway_ip']}\033[0m")
-            if not network_info['gateway_mac']:
+            if not network_info.get('gateway_mac'):
                 print(f"\033[1;33m[*] Определяю MAC шлюза {network_info['gateway_ip']}...\033[0m")
                 network_info['gateway_mac'] = get_mac_by_arp(network_info['gateway_ip'], retries=3)
             
@@ -378,26 +396,56 @@ def main():
         print("\033[1;33m    sudo python3 arp_kill.py\033[0m")
         sys.exit(1)
     
-    # Получаем основную информацию о сети
-    network_info = main_menu()
-    
-    # Выбор режима
-    mode_options = [
-        "🔍 Агрессивное сканирование сети",
-        "📝 Ввести данные вручную"
-    ]
-    
-    mode = run_fzf(mode_options, "🎯 Выберите режим →")
-    if not mode:
-        sys.exit(1)
-    
-    if "сканирование" in mode.lower():
-        attack = scan_and_attack_mode(network_info)
-        if attack:
-            confirm_and_start_attack(attack)
-    else:
-        attack = manual_mode(network_info)
-        confirm_and_start_attack(attack)
+    # Основной цикл программы
+    while True:
+        try:
+            # Получаем основную информацию о сети
+            network_info = main_menu()
+            
+            # Выбор режима
+            mode_options = [
+                "🔍 Агрессивное сканирование сети",
+                "📝 Ввести данные вручную",
+                "❌ Выход"
+            ]
+            
+            mode = run_fzf(mode_options, "🎯 Выберите режим →")
+            if not mode:
+                continue
+            
+            if "выход" in mode.lower():
+                print("\033[1;33m[!] Выход из программы\033[0m")
+                sys.exit(0)
+            
+            if "сканирование" in mode.lower():
+                attack = scan_and_attack_mode(network_info)
+                if attack:
+                    confirm_and_start_attack(attack)
+                    # После завершения атаки спрашиваем, что делать дальше
+                    continue_choice = run_fzf(["🔄 Начать новую атаку", "❌ Выход"], "Что делать дальше? →")
+                    if not continue_choice or "выход" in continue_choice.lower():
+                        print("\033[1;33m[!] Выход из программы\033[0m")
+                        sys.exit(0)
+                    # Иначе начинаем заново
+            else:
+                attack = manual_mode(network_info)
+                confirm_and_start_attack(attack)
+                # После завершения атаки спрашиваем, что делать дальше
+                continue_choice = run_fzf(["🔄 Начать новую атаку", "❌ Выход"], "Что делать дальше? →")
+                if not continue_choice or "выход" in continue_choice.lower():
+                    print("\033[1;33m[!] Выход из программы\033[0m")
+                    sys.exit(0)
+                # Иначе начинаем заново
+        
+        except KeyboardInterrupt:
+            print("\n\033[1;33m[!] Программа прервана пользователем\033[0m")
+            sys.exit(0)
+        except Exception as e:
+            print(f"\n\033[1;31m[!] Ошибка: {str(e)}\033[0m")
+            import traceback
+            traceback.print_exc()
+            print("\n\033[1;33m[!] Возврат в главное меню...\033[0m")
+            time.sleep(2)
 
 if __name__ == "__main__":
     main()

